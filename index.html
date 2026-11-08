@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Territory Rush</title>
+<style>
+  :root { --bg:#0b0f17; --panel:#121826; --line:#233147; --txt:#e6edf3; --dim:#8b98ad; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--txt); min-height:100vh; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0 0 2px; font-size:20px; letter-spacing:.3px; }
+  header p { margin:0; color:var(--dim); font-size:13px; }
+  main { max-width:640px; margin:0 auto; padding:20px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }
+  .btn { background:#1b2436; border:1px solid var(--line); color:var(--txt);
+         padding:9px 14px; border-radius:8px; cursor:pointer; font-size:14px; }
+  .btn:disabled { opacity:.4; cursor:default; }
+  .btn.primary { background:#2f81f7; border-color:#2f81f7; }
+  select, input { background:#0f1522; border:1px solid var(--line); color:var(--txt);
+                  padding:9px; border-radius:8px; font-size:14px; }
+  .grid { display:grid; gap:3px; margin:14px 0; }
+  .cell { aspect-ratio:1; border-radius:4px; background:#101726; cursor:pointer;
+          transition:transform .05s; border:1px solid #1a2434; }
+  .cell:hover { outline:2px solid #4a90f7; }
+  .p0 { background:#2f81f7; } .p1 { background:#e5533d; }
+  .p2 { background:#3fb950; } .p3 { background:#e3a008; }
+  .legal { outline:2px dashed #8b98ad; }
+  .status { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+            padding:12px 14px; margin:10px 0; font-size:14px; }
+  .legend { display:flex; gap:14px; margin:8px 0; flex-wrap:wrap; font-size:13px; }
+  .legend span { display:flex; align-items:center; gap:6px; }
+  .dot { width:12px; height:12px; border-radius:3px; display:inline-block; }
+  .muted { color:var(--dim); }
+  code { background:#0f1522; padding:2px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Territory Rush</h1>
+  <p>Turn-based grid strategy — humans &amp; agents, same match.</p>
+</header>
+<main>
+  <div class="row">
+    <select id="nplayers">
+      <option value="2">2 players</option>
+      <option value="3">3 players</option>
+      <option value="4">4 players</option>
+    </select>
+    <button class="btn primary" id="new">New game</button>
+    <span class="muted" id="code"></span>
+  </div>
+  <div class="row">
+    <button class="btn" id="move-expand">▲ Expand</button>
+    <button class="btn" id="move-jump">⤴ Jump (2)</button>
+    <button class="btn" id="join">Join seat</button>
+  </div>
+  <div class="legend">
+    <span><i class="dot p0"></i> You</span>
+    <span><i class="dot p1"></i> P2</span>
+    <span><i class="dot p2"></i> P3</span>
+    <span><i class="dot p3"></i> P4</span>
+  </div>
+  <div class="status" id="status">Create a game to start.</div>
+  <div class="grid" id="grid"></div>
+  <p class="muted">Win = most territory when the board fills. <b>Expand</b> claims an adjacent
+  cell; <b>Jump</b> claims a cell 2 steps away (2 charges). Empty seats are played by a bot.</p>
+</body>
+<script>
+let code=null, myId=0, game=null, pendingKind='expand', pendingCell=null;
+const N=7;
+async function api(path, body){
+  const r=await fetch(path, body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{});
+  return r.json();
+}
+async function refresh(){
+  if(!code) return;
+  const d=await api('/api/game/'+code);
+  game=d.game;
+  if(game.over){ statusEl('Game over. '+(game.tied?'Tie between '+game.winners.join(', '):'Winner: Player '+game.winner)); }
+  else statusEl('Turn: Player '+game.turn+(game.turn===myId?' (you)':'')+' — your jumps left: '+game.jumps[myId]);
+  render();
+}
+function render(){
+  const g=document.getElementById('grid');
+  g.style.gridTemplateColumns='repeat('+N+', 1fr)';
+  g.innerHTML='';
+  const legal = game&&!game.over && game.turn===myId ? legalCells() : {expand:[],jump:[]};
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    const d=document.createElement('div');
+    d.className='cell '+(game.board[r][c]>=0?'p'+game.board[r][c]:'');
+    if(game.board[r][c]<0){
+      const key=r+','+c;
+      if(legal[pendingKind].some(x=>x[0]===r&&x[1]===c)) d.classList.add('legal');
+      d.onclick=()=>{ pendingCell=[r,c]; doMove(); };
+    }
+    g.appendChild(d);
+  }
+}
+function legalCells(){
+  const s=new Set(), j=new Set();
+  // derive: cell belongs to me is board[r][c]===myId; empty neighbours
+  const mine=[], empty=[];
+  for(let r=0;r<N;r++)for(let c=0;c<N;c++){
+    if(game.board[r][c]===myId) mine.push([r,c]);
+    if(game.board[r][c]===-1) empty.push([r,c]);
+  }
+  for(const [r,c] of mine){
+    for(const [dr,dc] of [[-1,0],[1,0],[0,-1],[0,1]]){
+      const a=[r+dr,c+dc]; if(empty.some(e=>e[0]===a[0]&&e[1]===a[1])) s.add(a[0]+','+a[1]);
+    }
+    if(game.jumps[myId]>0) for(const [dr,dc] of [[-2,0],[2,0],[0,-2],[0,2]]){
+      const a=[r+dr,c+dc]; if(a[0]>=0&&a[0]<N&&a[1]>=0&&a[1]<N&&game.board[a[0]][a[1]]===-1) j.add(a[0]+','+a[1]);
+    }
+  }
+  return {expand:[...s].map(k=>k.split(',').map(Number)), jump:[...j].map(k=>k.split(',').map(Number))};
+}
+async function doMove(){
+  if(!pendingCell||!code||game.over||game.turn!==myId) return;
+  const d=await api('/api/game/'+code+'/move',{player:myId,move:pendingKind,cell:pendingCell});
+  pendingCell=null;
+  if(d.error) statusEl('Error: '+d.error);
+  if(d.game) game=d.game;
+  render();
+}
+const statusEl=t=>{document.getElementById('status').textContent=t;};
+document.getElementById('new').onclick=async()=>{
+  const n=+document.getElementById('nplayers').value;
+  const d=await api('/api/game',{players:n});
+  code=d.code; myId=0;
+  document.getElementById('code').textContent='code '+code;
+  await refresh();
+};
+document.getElementById('join').onclick=async()=>{
+  if(!code){ code=prompt('Enter match code:'); if(!code) return; }
+  const d=await api('/api/game/'+code+'/join',{});
+  if(d.player!=null) myId=d.player;
+  document.getElementById('code').textContent='code '+code+' (you=P'+myId+')';
+  await refresh();
+};
+document.getElementById('move-expand').onclick=()=>{pendingKind='expand';render();};
+document.getElementById('move-jump').onclick=()=>{pendingKind='jump';render();};
+</script>
+</html>
